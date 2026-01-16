@@ -17,7 +17,6 @@ A custom shell built from scratch in Go - Learning project to understand how she
 
 ### Upcoming Features 🚀
 
-- [ ] Environment variables (set, get, unset, list)
 - [ ] Command history (up/down arrow navigation)
 - [ ] Piping between commands (|)
 - [ ] Input/output redirection (>, <, >>)
