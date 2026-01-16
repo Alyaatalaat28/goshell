@@ -1,23 +1,34 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/chzyer/readline"
 )
 
+var history []string
+
 func main() {
-	reader := bufio.NewReader(os.Stdin)
+	// Configure readline with history
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "myshell> ",
+		HistoryFile:     ".myshell_history",
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing readline: %v\n", err)
+		os.Exit(1)
+	}
+	defer rl.Close()
 
 	for {
-		fmt.Print("myshell> ")
-
-		input, err := reader.ReadString('\n')
+		input, err := rl.Readline()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			continue
+			break
 		}
 
 		input = strings.TrimSpace(input)
@@ -29,6 +40,9 @@ func main() {
 		if input == "exit" {
 			break
 		}
+
+		// Add to history
+		history = append(history, input)
 
 		executeCommand(input)
 	}
@@ -78,7 +92,7 @@ func executeCommand(input string) {
 		return
 
 	case "set":
-
+		// set VAR_NAME value
 		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "set: usage: set VAR_NAME value")
 			return
@@ -94,7 +108,7 @@ func executeCommand(input string) {
 		return
 
 	case "get":
-
+		// get VAR_NAME
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "get: usage: get VAR_NAME")
 			return
@@ -109,7 +123,7 @@ func executeCommand(input string) {
 		return
 
 	case "unset":
-
+		// unset VAR_NAME
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "unset: usage: unset VAR_NAME")
 			return
@@ -124,7 +138,7 @@ func executeCommand(input string) {
 		return
 
 	case "list":
-
+		// list all environment variables
 		envVars := os.Environ()
 		if len(envVars) == 0 {
 			fmt.Println("No environment variables set")
@@ -133,6 +147,18 @@ func executeCommand(input string) {
 		fmt.Println("\nEnvironment Variables:")
 		for _, env := range envVars {
 			fmt.Println(env)
+		}
+		return
+
+	case "history":
+		// show command history
+		if len(history) == 0 {
+			fmt.Println("No commands in history")
+			return
+		}
+		fmt.Println("\nCommand History:")
+		for i, cmd := range history {
+			fmt.Printf("%4d  %s\n", i+1, cmd)
 		}
 		return
 
@@ -146,8 +172,12 @@ func executeCommand(input string) {
 		fmt.Println("  get        - Get environment variable (usage: get VAR_NAME)")
 		fmt.Println("  unset      - Unset environment variable (usage: unset VAR_NAME)")
 		fmt.Println("  list       - List all environment variables")
+		fmt.Println("  history    - Show command history")
 		fmt.Println("  help       - Show this help message")
 		fmt.Println("  exit       - Exit the shell")
+		fmt.Println("\nNavigation:")
+		fmt.Println("  ↑/↓        - Navigate command history")
+		fmt.Println("  Ctrl+C     - Cancel current line")
 		fmt.Println("\nAll other commands are executed through cmd.exe")
 		return
 	}

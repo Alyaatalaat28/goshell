@@ -17,7 +17,6 @@ A custom shell built from scratch in Go - Learning project to understand how she
 
 ### Upcoming Features 🚀
 
-- [ ] Command history (up/down arrow navigation)
 - [ ] Piping between commands (|)
 - [ ] Input/output redirection (>, <, >>)
 - [ ] Background processes (&)
