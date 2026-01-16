@@ -77,12 +77,75 @@ func executeCommand(input string) {
 		cmd.Run()
 		return
 
+	case "set":
+
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "set: usage: set VAR_NAME value")
+			return
+		}
+		varName := args[1]
+		varValue := strings.Join(args[2:], " ")
+		err := os.Setenv(varName, varValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "set: %v\n", err)
+		} else {
+			fmt.Printf("Set %s=%s\n", varName, varValue)
+		}
+		return
+
+	case "get":
+
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "get: usage: get VAR_NAME")
+			return
+		}
+		varName := args[1]
+		value, exists := os.LookupEnv(varName)
+		if exists {
+			fmt.Printf("%s=%s\n", varName, value)
+		} else {
+			fmt.Printf("%s is not set\n", varName)
+		}
+		return
+
+	case "unset":
+
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "unset: usage: unset VAR_NAME")
+			return
+		}
+		varName := args[1]
+		err := os.Unsetenv(varName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "unset: %v\n", err)
+		} else {
+			fmt.Printf("Unset %s\n", varName)
+		}
+		return
+
+	case "list":
+
+		envVars := os.Environ()
+		if len(envVars) == 0 {
+			fmt.Println("No environment variables set")
+			return
+		}
+		fmt.Println("\nEnvironment Variables:")
+		for _, env := range envVars {
+			fmt.Println(env)
+		}
+		return
+
 	case "help":
 
 		fmt.Println("\nAvailable commands:")
 		fmt.Println("  cd [dir]   - Change directory")
 		fmt.Println("  pwd        - Print working directory")
 		fmt.Println("  clear      - Clear screen")
+		fmt.Println("  set        - Set environment variable (usage: set VAR_NAME value)")
+		fmt.Println("  get        - Get environment variable (usage: get VAR_NAME)")
+		fmt.Println("  unset      - Unset environment variable (usage: unset VAR_NAME)")
+		fmt.Println("  list       - List all environment variables")
 		fmt.Println("  help       - Show this help message")
 		fmt.Println("  exit       - Exit the shell")
 		fmt.Println("\nAll other commands are executed through cmd.exe")
