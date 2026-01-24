@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -50,19 +51,65 @@ func main() {
 }
 
 func executeCommand(input string) {
+
+	redirectInfo := parseRedirections(input)
+
 	// Check if input contains a pipe
-	if strings.Contains(input, "|") {
-		executePipedCommands(input)
+	if strings.Contains(redirectInfo.command, "|") {
+		executePipedCommands(redirectInfo)
 		return
 	}
 
-	// Execute single command
-	executeSingleCommand(input, nil, true)
+	// Execute single command with redirections
+	executeSingleCommand(redirectInfo.command, nil, true, redirectInfo)
 }
 
-func executePipedCommands(input string) {
+type RedirectionInfo struct {
+	command      string
+	inputFile    string
+	outputFile   string
+	appendOutput bool
+	hasInput     bool
+	hasOutput    bool
+}
 
-	commands := strings.Split(input, "|")
+func parseRedirections(input string) RedirectionInfo {
+	info := RedirectionInfo{command: input}
+
+	// Check for input redirection (<)
+	if strings.Contains(input, "<") {
+		parts := strings.SplitN(input, "<", 2)
+		info.command = strings.TrimSpace(parts[0])
+		remaining := strings.TrimSpace(parts[1])
+
+		fields := strings.Fields(remaining)
+		if len(fields) > 0 {
+			info.inputFile = fields[0]
+			info.hasInput = true
+		}
+	}
+
+	// Check for output redirection (>> or >)
+	if strings.Contains(info.command, ">>") {
+		parts := strings.SplitN(info.command, ">>", 2)
+		info.command = strings.TrimSpace(parts[0])
+		info.outputFile = strings.TrimSpace(parts[1])
+		info.appendOutput = true
+		info.hasOutput = true
+	} else if strings.Contains(info.command, ">") {
+		parts := strings.SplitN(info.command, ">", 2)
+		info.command = strings.TrimSpace(parts[0])
+		info.outputFile = strings.TrimSpace(parts[1])
+		info.appendOutput = false
+		info.hasOutput = true
+	}
+
+	return info
+}
+
+func executePipedCommands(redirectInfo RedirectionInfo) {
+
+	commands := strings.Split(redirectInfo.command, "|")
 
 	for i := range commands {
 		commands[i] = strings.TrimSpace(commands[i])
@@ -73,8 +120,6 @@ func executePipedCommands(input string) {
 		return
 	}
 
-	// Check if all commands are external (not built-in)
-	// If so, let cmd.exe handle the piping natively
 	allExternal := true
 	for _, cmdStr := range commands {
 		args := strings.Split(cmdStr, " ")
@@ -84,9 +129,9 @@ func executePipedCommands(input string) {
 		}
 	}
 
-	if allExternal {
+	if allExternal && !redirectInfo.hasInput && !redirectInfo.hasOutput {
 		// Let Windows handle the pipe natively
-		cmd := exec.Command("cmd", "/C", input)
+		cmd := exec.Command("cmd", "/C", redirectInfo.command)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		err := cmd.Run()
@@ -96,13 +141,20 @@ func executePipedCommands(input string) {
 		return
 	}
 
-	// Manual pipe handling for commands involving built-ins
 	var previousOutput *bytes.Buffer
 
 	for i, cmdStr := range commands {
 		isLast := i == len(commands)-1
 
-		output := executeSingleCommand(cmdStr, previousOutput, isLast)
+		var cmdRedirect RedirectionInfo
+		if isLast {
+			cmdRedirect = redirectInfo
+			cmdRedirect.command = cmdStr
+		} else {
+			cmdRedirect = RedirectionInfo{command: cmdStr}
+		}
+
+		output := executeSingleCommand(cmdStr, previousOutput, isLast, cmdRedirect)
 
 		if output == nil && !isLast {
 
@@ -123,12 +175,51 @@ func isBuiltinCommand(cmd string) bool {
 	return false
 }
 
-func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bool) *bytes.Buffer {
+func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bool, redirectInfo RedirectionInfo) *bytes.Buffer {
+
 	args := strings.Split(input, " ")
+
+	// Handle input redirection
+	var inputReader io.Reader
+	if redirectInfo.hasInput {
+		file, err := os.Open(redirectInfo.inputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening input file: %v\n", err)
+			return nil
+		}
+		defer file.Close()
+		inputReader = file
+	} else if pipeInput != nil {
+		inputReader = strings.NewReader(pipeInput.String())
+	}
+
+	// Prepare output writer
+	var outputWriter io.Writer
+	var outputBuffer bytes.Buffer
+	var outputFile *os.File
+
+	if redirectInfo.hasOutput && isLastInPipe {
+		var err error
+		if redirectInfo.appendOutput {
+			outputFile, err = os.OpenFile(redirectInfo.outputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		} else {
+			outputFile, err = os.Create(redirectInfo.outputFile)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening output file: %v\n", err)
+			return nil
+		}
+		defer outputFile.Close()
+		outputWriter = io.MultiWriter(&outputBuffer, outputFile)
+	} else {
+		outputWriter = &outputBuffer
+	}
 
 	switch args[0] {
 	case "cd":
+
 		if len(args) < 2 {
+
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "cd: %v\n", err)
@@ -153,17 +244,17 @@ func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bo
 			return nil
 		}
 
-		output := bytes.NewBufferString(dir + "\n")
+		fmt.Fprintf(outputWriter, "%s\n", dir)
 
-		if pipeInput == nil && isLastInPipe {
+		if !redirectInfo.hasOutput && (pipeInput == nil && isLastInPipe) {
 			fmt.Println(dir)
 		}
-		return output
+		return &outputBuffer
 
 	case "clear":
-
-		if pipeInput != nil {
-			fmt.Fprintln(os.Stderr, "clear: cannot be used in a pipe")
+		// Clear doesn't work in pipes or with redirections
+		if pipeInput != nil || redirectInfo.hasOutput {
+			fmt.Fprintln(os.Stderr, "clear: cannot be used in a pipe or with redirections")
 			return nil
 		}
 		cmd := exec.Command("cmd", "/c", "cls")
@@ -184,12 +275,13 @@ func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bo
 			return nil
 		}
 
-		output := bytes.NewBufferString(fmt.Sprintf("Set %s=%s\n", varName, varValue))
+		fmt.Fprintf(outputWriter, "Set %s=%s\n", varName, varValue)
 
-		if pipeInput == nil && isLastInPipe {
+		// Only print to stdout if not redirected and not in middle of pipe
+		if !redirectInfo.hasOutput && (pipeInput == nil && isLastInPipe) {
 			fmt.Printf("Set %s=%s\n", varName, varValue)
 		}
-		return output
+		return &outputBuffer
 
 	case "get":
 		if len(args) < 2 {
@@ -199,21 +291,20 @@ func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bo
 		varName := args[1]
 		value, exists := os.LookupEnv(varName)
 
-		var output *bytes.Buffer
 		if exists {
-			output = bytes.NewBufferString(fmt.Sprintf("%s=%s\n", varName, value))
-
-			if pipeInput == nil && isLastInPipe {
+			fmt.Fprintf(outputWriter, "%s=%s\n", varName, value)
+			// Only print to stdout if not redirected and not in middle of pipe
+			if !redirectInfo.hasOutput && (pipeInput == nil && isLastInPipe) {
 				fmt.Printf("%s=%s\n", varName, value)
 			}
 		} else {
-			output = bytes.NewBufferString(fmt.Sprintf("%s is not set\n", varName))
-
-			if pipeInput == nil && isLastInPipe {
+			fmt.Fprintf(outputWriter, "%s is not set\n", varName)
+			// Only print to stdout if not redirected and not in middle of pipe
+			if !redirectInfo.hasOutput && (pipeInput == nil && isLastInPipe) {
 				fmt.Printf("%s is not set\n", varName)
 			}
 		}
-		return output
+		return &outputBuffer
 
 	case "unset":
 		if len(args) < 2 {
@@ -227,12 +318,13 @@ func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bo
 			return nil
 		}
 
-		output := bytes.NewBufferString(fmt.Sprintf("Unset %s\n", varName))
+		fmt.Fprintf(outputWriter, "Unset %s\n", varName)
 
-		if pipeInput == nil && isLastInPipe {
+		// Only print to stdout if not redirected and not in middle of pipe
+		if !redirectInfo.hasOutput && (pipeInput == nil && isLastInPipe) {
 			fmt.Printf("Unset %s\n", varName)
 		}
-		return output
+		return &outputBuffer
 
 	case "list":
 		envVars := os.Environ()
@@ -241,16 +333,16 @@ func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bo
 			return nil
 		}
 
-		var output bytes.Buffer
-		output.WriteString("\nEnvironment Variables:\n")
+		fmt.Fprintf(outputWriter, "\nEnvironment Variables:\n")
 		for _, env := range envVars {
-			output.WriteString(env + "\n")
+			fmt.Fprintf(outputWriter, "%s\n", env)
 		}
 
-		if pipeInput == nil && isLastInPipe {
-			fmt.Print(output.String())
+		// Only print to stdout if not redirected and not in middle of pipe
+		if !redirectInfo.hasOutput && (pipeInput == nil && isLastInPipe) {
+			fmt.Print(outputBuffer.String())
 		}
-		return &output
+		return &outputBuffer
 
 	case "history":
 		if len(history) == 0 {
@@ -258,49 +350,54 @@ func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bo
 			return nil
 		}
 
-		var output bytes.Buffer
-		output.WriteString("\nCommand History:\n")
+		fmt.Fprintf(outputWriter, "\nCommand History:\n")
 		for i, cmd := range history {
-			output.WriteString(fmt.Sprintf("%4d  %s\n", i+1, cmd))
+			fmt.Fprintf(outputWriter, "%4d  %s\n", i+1, cmd)
 		}
 
-		if pipeInput == nil && isLastInPipe {
-			fmt.Print(output.String())
+		// Only print to stdout if not redirected and not in middle of pipe
+		if !redirectInfo.hasOutput && (pipeInput == nil && isLastInPipe) {
+			fmt.Print(outputBuffer.String())
 		}
-		return &output
+		return &outputBuffer
 
 	case "help":
-		var output bytes.Buffer
-		output.WriteString("\n=== MyShell Help ===\n")
-		output.WriteString("\n**Built-in Commands:**\n")
-		output.WriteString("  cd [dir]   - Change directory (no argument goes to home)\n")
-		output.WriteString("  pwd        - Print current working directory\n")
-		output.WriteString("  clear      - Clear the screen\n")
-		output.WriteString("  help       - Show available commands\n")
-		output.WriteString("  exit       - Exit the shell\n")
-		output.WriteString("\n**Environment Variable Commands:**\n")
-		output.WriteString("  set        - Set environment variable (usage: set VAR_NAME value)\n")
-		output.WriteString("  get        - Get environment variable (usage: get VAR_NAME)\n")
-		output.WriteString("  unset      - Unset environment variable (usage: unset VAR_NAME)\n")
-		output.WriteString("  list       - List all environment variables\n")
-		output.WriteString("\n**History Commands:**\n")
-		output.WriteString("  history    - Show command history\n")
-		output.WriteString("\n**Navigation & Shortcuts:**\n")
-		output.WriteString("  ↑/↓        - Navigate command history\n")
-		output.WriteString("  ←/→        - Move cursor within line\n")
-		output.WriteString("  Home/End   - Jump to start/end of line\n")
-		output.WriteString("  Ctrl+C     - Cancel current line\n")
-		output.WriteString("\n**Piping:**\n")
-		output.WriteString("  |          - Pipe output between commands (e.g., history | findstr cd)\n")
-		output.WriteString("\n**External Commands:**\n")
-		output.WriteString("  All other commands are executed through cmd.exe\n")
+		fmt.Fprintf(outputWriter, "\n=== MyShell Help ===\n")
+		fmt.Fprintf(outputWriter, "\n**Built-in Commands:**\n")
+		fmt.Fprintf(outputWriter, "  cd [dir]   - Change directory (no argument goes to home)\n")
+		fmt.Fprintf(outputWriter, "  pwd        - Print current working directory\n")
+		fmt.Fprintf(outputWriter, "  clear      - Clear the screen\n")
+		fmt.Fprintf(outputWriter, "  help       - Show available commands\n")
+		fmt.Fprintf(outputWriter, "  exit       - Exit the shell\n")
+		fmt.Fprintf(outputWriter, "\n**Environment Variable Commands:**\n")
+		fmt.Fprintf(outputWriter, "  set        - Set environment variable (usage: set VAR_NAME value)\n")
+		fmt.Fprintf(outputWriter, "  get        - Get environment variable (usage: get VAR_NAME)\n")
+		fmt.Fprintf(outputWriter, "  unset      - Unset environment variable (usage: unset VAR_NAME)\n")
+		fmt.Fprintf(outputWriter, "  list       - List all environment variables\n")
+		fmt.Fprintf(outputWriter, "\n**History Commands:**\n")
+		fmt.Fprintf(outputWriter, "  history    - Show command history\n")
+		fmt.Fprintf(outputWriter, "\n**Navigation & Shortcuts:**\n")
+		fmt.Fprintf(outputWriter, "  ↑/↓        - Navigate command history\n")
+		fmt.Fprintf(outputWriter, "  ←/→        - Move cursor within line\n")
+		fmt.Fprintf(outputWriter, "  Home/End   - Jump to start/end of line\n")
+		fmt.Fprintf(outputWriter, "  Ctrl+C     - Cancel current line\n")
+		fmt.Fprintf(outputWriter, "\n**Piping:**\n")
+		fmt.Fprintf(outputWriter, "  |          - Pipe output between commands (e.g., history | findstr cd)\n")
+		fmt.Fprintf(outputWriter, "\n**Redirection:**\n")
+		fmt.Fprintf(outputWriter, "  >          - Redirect output to file (e.g., history > output.txt)\n")
+		fmt.Fprintf(outputWriter, "  >>         - Append output to file (e.g., pwd >> log.txt)\n")
+		fmt.Fprintf(outputWriter, "  <          - Read input from file (e.g., sort < input.txt)\n")
+		fmt.Fprintf(outputWriter, "\n**External Commands:**\n")
+		fmt.Fprintf(outputWriter, "  All other commands are executed through cmd.exe\n")
 
-		if pipeInput == nil && isLastInPipe {
-			fmt.Print(output.String())
+		// Only print to stdout if not redirected and not in middle of pipe
+		if !redirectInfo.hasOutput && (pipeInput == nil && isLastInPipe) {
+			fmt.Print(outputBuffer.String())
 		}
-		return &output
+		return &outputBuffer
 	}
 
+	// Execute external command
 	var cmd *exec.Cmd
 	if len(args) == 1 {
 		cmd = exec.Command("cmd", "/C", args[0])
@@ -308,12 +405,13 @@ func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bo
 		cmd = exec.Command("cmd", "/C", input)
 	}
 
-	if pipeInput != nil {
-		cmd.Stdin = strings.NewReader(pipeInput.String())
+	// Set up input
+	if inputReader != nil {
+		cmd.Stdin = inputReader
 	}
 
-	var output bytes.Buffer
-	cmd.Stdout = &output
+	// Set up output
+	cmd.Stdout = outputWriter
 	cmd.Stderr = os.Stderr
 
 	err := cmd.Run()
@@ -322,9 +420,10 @@ func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bo
 		return nil
 	}
 
-	if isLastInPipe {
-		fmt.Print(output.String())
+	// If this is the last command in pipe and not redirected, print the output
+	if isLastInPipe && !redirectInfo.hasOutput {
+		fmt.Print(outputBuffer.String())
 	}
 
-	return &output
+	return &outputBuffer
 }

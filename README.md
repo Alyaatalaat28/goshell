@@ -28,12 +28,10 @@ A custom shell built from scratch in Go - Learning project to understand how she
 
 ### Upcoming Features 🚀
 
-- [ ] Input/output redirection (>, <, >>)
 - [ ] Background processes (&)
 - [ ] Better argument parsing (handle quotes)
 - [ ] Tab completion
 - [ ] Custom prompt showing current directory
-- [ ] Cross-platform support (Linux/Mac)
 - [ ] Script execution mode
 - [ ] Job control
 
