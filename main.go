@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -49,137 +50,255 @@ func main() {
 }
 
 func executeCommand(input string) {
+	// Check if input contains a pipe
+	if strings.Contains(input, "|") {
+		executePipedCommands(input)
+		return
+	}
 
+	// Execute single command
+	executeSingleCommand(input, nil, true)
+}
+
+func executePipedCommands(input string) {
+
+	commands := strings.Split(input, "|")
+
+	for i := range commands {
+		commands[i] = strings.TrimSpace(commands[i])
+	}
+
+	if len(commands) < 2 {
+		fmt.Fprintln(os.Stderr, "pipe: invalid pipe syntax")
+		return
+	}
+
+	// Check if all commands are external (not built-in)
+	// If so, let cmd.exe handle the piping natively
+	allExternal := true
+	for _, cmdStr := range commands {
+		args := strings.Split(cmdStr, " ")
+		if isBuiltinCommand(args[0]) {
+			allExternal = false
+			break
+		}
+	}
+
+	if allExternal {
+		// Let Windows handle the pipe natively
+		cmd := exec.Command("cmd", "/C", input)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
+		return
+	}
+
+	// Manual pipe handling for commands involving built-ins
+	var previousOutput *bytes.Buffer
+
+	for i, cmdStr := range commands {
+		isLast := i == len(commands)-1
+
+		output := executeSingleCommand(cmdStr, previousOutput, isLast)
+
+		if output == nil && !isLast {
+
+			return
+		}
+
+		previousOutput = output
+	}
+}
+
+func isBuiltinCommand(cmd string) bool {
+	builtins := []string{"cd", "pwd", "clear", "set", "get", "unset", "list", "history", "help", "exit"}
+	for _, builtin := range builtins {
+		if cmd == builtin {
+			return true
+		}
+	}
+	return false
+}
+
+func executeSingleCommand(input string, pipeInput *bytes.Buffer, isLastInPipe bool) *bytes.Buffer {
 	args := strings.Split(input, " ")
 
 	switch args[0] {
 	case "cd":
-
 		if len(args) < 2 {
-
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "cd: %v\n", err)
-				return
+				return nil
 			}
 			err = os.Chdir(homeDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "cd: %v\n", err)
 			}
-			return
+			return nil
 		}
 		err := os.Chdir(args[1])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cd: %v\n", err)
 		}
-		return
+		return nil
 
 	case "pwd":
-
 		dir, err := os.Getwd()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "pwd: %v\n", err)
-		} else {
+			return nil
+		}
+
+		output := bytes.NewBufferString(dir + "\n")
+
+		if pipeInput == nil && isLastInPipe {
 			fmt.Println(dir)
 		}
-		return
+		return output
 
 	case "clear":
 
+		if pipeInput != nil {
+			fmt.Fprintln(os.Stderr, "clear: cannot be used in a pipe")
+			return nil
+		}
 		cmd := exec.Command("cmd", "/c", "cls")
 		cmd.Stdout = os.Stdout
 		cmd.Run()
-		return
+		return nil
 
 	case "set":
-		// set VAR_NAME value
 		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "set: usage: set VAR_NAME value")
-			return
+			return nil
 		}
 		varName := args[1]
 		varValue := strings.Join(args[2:], " ")
 		err := os.Setenv(varName, varValue)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "set: %v\n", err)
-		} else {
+			return nil
+		}
+
+		output := bytes.NewBufferString(fmt.Sprintf("Set %s=%s\n", varName, varValue))
+
+		if pipeInput == nil && isLastInPipe {
 			fmt.Printf("Set %s=%s\n", varName, varValue)
 		}
-		return
+		return output
 
 	case "get":
-		// get VAR_NAME
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "get: usage: get VAR_NAME")
-			return
+			return nil
 		}
 		varName := args[1]
 		value, exists := os.LookupEnv(varName)
+
+		var output *bytes.Buffer
 		if exists {
-			fmt.Printf("%s=%s\n", varName, value)
+			output = bytes.NewBufferString(fmt.Sprintf("%s=%s\n", varName, value))
+
+			if pipeInput == nil && isLastInPipe {
+				fmt.Printf("%s=%s\n", varName, value)
+			}
 		} else {
-			fmt.Printf("%s is not set\n", varName)
+			output = bytes.NewBufferString(fmt.Sprintf("%s is not set\n", varName))
+
+			if pipeInput == nil && isLastInPipe {
+				fmt.Printf("%s is not set\n", varName)
+			}
 		}
-		return
+		return output
 
 	case "unset":
-		// unset VAR_NAME
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "unset: usage: unset VAR_NAME")
-			return
+			return nil
 		}
 		varName := args[1]
 		err := os.Unsetenv(varName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "unset: %v\n", err)
-		} else {
+			return nil
+		}
+
+		output := bytes.NewBufferString(fmt.Sprintf("Unset %s\n", varName))
+
+		if pipeInput == nil && isLastInPipe {
 			fmt.Printf("Unset %s\n", varName)
 		}
-		return
+		return output
 
 	case "list":
-		// list all environment variables
 		envVars := os.Environ()
 		if len(envVars) == 0 {
-			fmt.Println("No environment variables set")
-			return
+			fmt.Fprintln(os.Stderr, "No environment variables set")
+			return nil
 		}
-		fmt.Println("\nEnvironment Variables:")
+
+		var output bytes.Buffer
+		output.WriteString("\nEnvironment Variables:\n")
 		for _, env := range envVars {
-			fmt.Println(env)
+			output.WriteString(env + "\n")
 		}
-		return
+
+		if pipeInput == nil && isLastInPipe {
+			fmt.Print(output.String())
+		}
+		return &output
 
 	case "history":
-		// show command history
 		if len(history) == 0 {
-			fmt.Println("No commands in history")
-			return
+			fmt.Fprintln(os.Stderr, "No commands in history")
+			return nil
 		}
-		fmt.Println("\nCommand History:")
+
+		var output bytes.Buffer
+		output.WriteString("\nCommand History:\n")
 		for i, cmd := range history {
-			fmt.Printf("%4d  %s\n", i+1, cmd)
+			output.WriteString(fmt.Sprintf("%4d  %s\n", i+1, cmd))
 		}
-		return
+
+		if pipeInput == nil && isLastInPipe {
+			fmt.Print(output.String())
+		}
+		return &output
 
 	case "help":
+		var output bytes.Buffer
+		output.WriteString("\n=== MyShell Help ===\n")
+		output.WriteString("\n**Built-in Commands:**\n")
+		output.WriteString("  cd [dir]   - Change directory (no argument goes to home)\n")
+		output.WriteString("  pwd        - Print current working directory\n")
+		output.WriteString("  clear      - Clear the screen\n")
+		output.WriteString("  help       - Show available commands\n")
+		output.WriteString("  exit       - Exit the shell\n")
+		output.WriteString("\n**Environment Variable Commands:**\n")
+		output.WriteString("  set        - Set environment variable (usage: set VAR_NAME value)\n")
+		output.WriteString("  get        - Get environment variable (usage: get VAR_NAME)\n")
+		output.WriteString("  unset      - Unset environment variable (usage: unset VAR_NAME)\n")
+		output.WriteString("  list       - List all environment variables\n")
+		output.WriteString("\n**History Commands:**\n")
+		output.WriteString("  history    - Show command history\n")
+		output.WriteString("\n**Navigation & Shortcuts:**\n")
+		output.WriteString("  ↑/↓        - Navigate command history\n")
+		output.WriteString("  ←/→        - Move cursor within line\n")
+		output.WriteString("  Home/End   - Jump to start/end of line\n")
+		output.WriteString("  Ctrl+C     - Cancel current line\n")
+		output.WriteString("\n**Piping:**\n")
+		output.WriteString("  |          - Pipe output between commands (e.g., history | findstr cd)\n")
+		output.WriteString("\n**External Commands:**\n")
+		output.WriteString("  All other commands are executed through cmd.exe\n")
 
-		fmt.Println("\nAvailable commands:")
-		fmt.Println("  cd [dir]   - Change directory")
-		fmt.Println("  pwd        - Print working directory")
-		fmt.Println("  clear      - Clear screen")
-		fmt.Println("  set        - Set environment variable (usage: set VAR_NAME value)")
-		fmt.Println("  get        - Get environment variable (usage: get VAR_NAME)")
-		fmt.Println("  unset      - Unset environment variable (usage: unset VAR_NAME)")
-		fmt.Println("  list       - List all environment variables")
-		fmt.Println("  history    - Show command history")
-		fmt.Println("  help       - Show this help message")
-		fmt.Println("  exit       - Exit the shell")
-		fmt.Println("\nNavigation:")
-		fmt.Println("  ↑/↓        - Navigate command history")
-		fmt.Println("  Ctrl+C     - Cancel current line")
-		fmt.Println("\nAll other commands are executed through cmd.exe")
-		return
+		if pipeInput == nil && isLastInPipe {
+			fmt.Print(output.String())
+		}
+		return &output
 	}
 
 	var cmd *exec.Cmd
@@ -189,11 +308,23 @@ func executeCommand(input string) {
 		cmd = exec.Command("cmd", "/C", input)
 	}
 
-	cmd.Stdout = os.Stdout
+	if pipeInput != nil {
+		cmd.Stdin = strings.NewReader(pipeInput.String())
+	}
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
 	cmd.Stderr = os.Stderr
 
 	err := cmd.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return nil
 	}
+
+	if isLastInPipe {
+		fmt.Print(output.String())
+	}
+
+	return &output
 }
