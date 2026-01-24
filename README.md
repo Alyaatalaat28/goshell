@@ -28,7 +28,6 @@ A custom shell built from scratch in Go - Learning project to understand how she
 
 ### Upcoming Features 🚀
 
-- [ ] Piping between commands (|)
 - [ ] Input/output redirection (>, <, >>)
 - [ ] Background processes (&)
 - [ ] Better argument parsing (handle quotes)
